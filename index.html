@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>SYSDE-HEVEA — Carte</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    html, body, #map { height: 100%; margin: 0; padding: 0; background: #e8e8e8; }
+    .leaflet-control-zoom { border: none !important; box-shadow: 0 1px 4px rgba(0,0,0,0.25); }
+    .leaflet-control-zoom a { border-radius: 6px !important; }
+    .leaflet-touch .leaflet-bar a { width: 34px; height: 34px; line-height: 34px; }
+    .user-dot { width: 18px; height: 18px; border-radius: 50%; background: #2f7bf6;
+      border: 3px solid #fff; box-shadow: 0 0 0 rgba(47,123,246,0.5); animation: pulse 2s infinite; }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(47,123,246,0.45); }
+      70% { box-shadow: 0 0 0 16px rgba(47,123,246,0); }
+      100% { box-shadow: 0 0 0 0 rgba(47,123,246,0); }
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <script>
+    (function () {
+      var params = new URLSearchParams(location.search);
+      var CAPTURE = params.get('capture') === '1';
+      var PRIMARY = params.get('primary') || '#146C43';
+
+      var CI_CENTER = [7.54, -5.5471];
+      var CI_ZOOM = 7;
+
+      var map = L.map('map', { zoomControl: true, attributionControl: true, fadeAnimation: false })
+        .setView(CI_CENTER, CI_ZOOM);
+
+      var baseLayers = {
+        plan: L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png', {
+          maxZoom: 20, subdomains: 'abcd', attribution: '© OpenStreetMap © CARTO'
+        }),
+        satellite: L.tileLayer(
+          'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+          { maxZoom: 19, attribution: '© Esri' }
+        )
+      };
+
+      var currentLayer = 'plan';
+      baseLayers.plan.addTo(map);
+
+      var userMarker = null;
+
+      function post(msg) {
+        var payload = JSON.stringify(msg);
+        if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(payload);
+        else if (window.parent && window.parent !== window) window.parent.postMessage(msg, '*');
+      }
+
+      // --- Perimeter capture ---------------------------------------------------
+      var points = [];
+      var shapeLayer = L.layerGroup().addTo(map);
+      var visible = true;
+
+      function geodesicArea(pts) {
+        var n = pts.length, area = 0, d2r = Math.PI / 180, p1, p2;
+        if (n > 2) {
+          for (var i = 0; i < n; i++) {
+            p1 = pts[i];
+            p2 = pts[(i + 1) % n];
+            area += ((p2.lng - p1.lng) * d2r) * (2 + Math.sin(p1.lat * d2r) + Math.sin(p2.lat * d2r));
+          }
+          area = area * 6378137.0 * 6378137.0 / 2.0;
+        }
+        return Math.abs(area);
+      }
+
+      function perimeter(pts) {
+        if (pts.length < 2) return 0;
+        var total = 0;
+        for (var i = 0; i < pts.length - 1; i++) total += map.distance(pts[i], pts[i + 1]);
+        if (pts.length >= 3) total += map.distance(pts[pts.length - 1], pts[0]);
+        return total;
+      }
+
+      function redraw() {
+        shapeLayer.clearLayers();
+        if (visible && points.length) {
+          if (points.length >= 3) {
+            L.polygon(points, { color: PRIMARY, weight: 3, fillColor: PRIMARY, fillOpacity: 0.2 }).addTo(shapeLayer);
+          } else {
+            L.polyline(points, { color: PRIMARY, weight: 3 }).addTo(shapeLayer);
+          }
+          points.forEach(function (p) {
+            L.circleMarker(p, { radius: 5, color: '#fff', weight: 2, fillColor: PRIMARY, fillOpacity: 1 })
+              .addTo(shapeLayer);
+          });
+        }
+        post({ type: 'geometry', count: points.length, areaHa: geodesicArea(points) / 10000, perimeterM: perimeter(points) });
+      }
+
+      window.SysdeMap = {
+        setBaseLayer: function (layer) {
+          if (layer === currentLayer || !baseLayers[layer]) return;
+          map.removeLayer(baseLayers[currentLayer]);
+          baseLayers[layer].addTo(map);
+          currentLayer = layer;
+          post({ type: 'baseLayerChanged', layer: layer });
+        },
+        toggleBaseLayer: function () {
+          this.setBaseLayer(currentLayer === 'plan' ? 'satellite' : 'plan');
+        },
+        setUserLocation: function (lat, lng, center) {
+          var latlng = [lat, lng];
+          if (!userMarker) {
+            var icon = L.divIcon({ className: '', html: '<div class="user-dot"></div>', iconSize: [18, 18] });
+            userMarker = L.marker(latlng, { icon: icon, interactive: false }).addTo(map);
+          } else {
+            userMarker.setLatLng(latlng);
+          }
+          if (center) map.flyTo(latlng, Math.max(map.getZoom(), 15), { duration: 0.8 });
+        },
+        addPoint: function (lat, lng, center) {
+          points.push(L.latLng(lat, lng));
+          redraw();
+          if (center) map.panTo([lat, lng]);
+        },
+        undo: function () { points.pop(); redraw(); },
+        clear: function () { points = []; redraw(); },
+        setVisible: function (v) { visible = v; redraw(); }
+      };
+
+      if (CAPTURE) {
+        map.on('click', function (e) { window.SysdeMap.addPoint(e.latlng.lat, e.latlng.lng); });
+      }
+
+      // Accept commands via postMessage too (used on web / iframe).
+      window.addEventListener('message', function (event) {
+        var data = event.data;
+        if (!data || typeof data !== 'object') return;
+        switch (data.command) {
+          case 'toggleLayer': window.SysdeMap.toggleBaseLayer(); break;
+          case 'setUserLocation': window.SysdeMap.setUserLocation(data.lat, data.lng, data.center); break;
+          case 'addPoint': window.SysdeMap.addPoint(data.lat, data.lng, data.center); break;
+          case 'undo': window.SysdeMap.undo(); break;
+          case 'clear': window.SysdeMap.clear(); break;
+          case 'setVisible': window.SysdeMap.setVisible(data.visible); break;
+        }
+      });
+
+      // Recompute size once the container is measured (WebView / iframe quirk).
+      function refreshSize() { map.invalidateSize(); }
+      window.addEventListener('load', function () { setTimeout(refreshSize, 60); });
+      window.addEventListener('resize', refreshSize);
+
+      map.whenReady(function () {
+        setTimeout(refreshSize, 60);
+        setTimeout(refreshSize, 400);
+        post({ type: 'ready' });
+      });
+    })();
+  </script>
+</body>
+</html>
